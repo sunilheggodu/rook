@@ -1,11 +1,13 @@
 module github.com/rook/rook
 
-go 1.16
+go 1.15
 
 require (
+	github.com/Microsoft/go-winio v0.4.15 // indirect
 	github.com/aws/aws-sdk-go v1.35.24
 	github.com/banzaicloud/k8s-objectmatcher v1.1.0
 	github.com/ceph/go-ceph v0.9.1-0.20210607162346-8179bd4437f9
+	github.com/container-storage-interface/spec v1.3.0 // indirect
 	github.com/coreos/pkg v0.0.0-20180928190104-399ea9e2e55f
 	github.com/csi-addons/volume-replication-operator v0.1.1-0.20210525040814-ab575a2879fb
 	github.com/davecgh/go-spew v1.1.1
@@ -17,6 +19,8 @@ require (
 	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.1.0
 	github.com/kube-object-storage/lib-bucket-provisioner v0.0.0-20210311161930-4bea5edaff58
 	github.com/libopenstorage/secrets v0.0.0-20201006135900-af310b01fe47
+	github.com/miekg/dns v1.1.35 // indirect
+	github.com/opencontainers/runc v1.0.0-rc93 // indirect
 	github.com/openshift/cluster-api v0.0.0-20191129101638-b09907ac6668
 	github.com/openshift/machine-api-operator v0.2.1-0.20190903202259-474e14e4965a
 	github.com/pkg/errors v0.9.1
@@ -38,7 +42,6 @@ require (
 	k8s.io/cloud-provider v0.21.1
 	k8s.io/component-helpers v0.21.1
 	k8s.io/kube-controller-manager v0.21.1
-	k8s.io/kubernetes v1.21.1
 	k8s.io/utils v0.21.1
 	sigs.k8s.io/controller-runtime v0.9.0
 	sigs.k8s.io/kustomize/kyaml v0.10.17
