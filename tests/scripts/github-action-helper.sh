@@ -23,6 +23,7 @@ set -xe
 NETWORK_ERROR="connection reset by peer"
 SERVICE_UNAVAILABLE_ERROR="Service Unavailable"
 INTERNAL_ERROR="INTERNAL_ERROR"
+INTERNAL_SERVER_ERROR="500 Internal Server Error"
 
 #############
 # FUNCTIONS #
@@ -109,17 +110,23 @@ function build_rook() {
           echo "network failure occurred, retrying..."
           continue
         ;;
+        *"$INTERNAL_SERVER_ERROR"*)
+          echo "network failure occurred, retrying..."
+          continue
+        ;;
         *)
           # valid failure
           exit 1
       esac
     fi
+    # no errors so we break the loop after the first iteration
+    break
   done
   # validate build
   tests/scripts/validate_modified_files.sh build
   docker images
   if [[ "$build_type" == "build" ]]; then
-    docker tag $(docker images | awk '/build-/ {print $1}') rook/ceph:master
+    docker tag "$(docker images | awk '/build-/ {print $1}')" rook/ceph:local-build
   fi
 }
 
@@ -131,7 +138,10 @@ function validate_yaml() {
   cd cluster/examples/kubernetes/ceph
   kubectl create -f crds.yaml -f common.yaml
   # skipping folders and some yamls that are only for openshift.
-  kubectl create $(ls -I scc.yaml -I "*-openshift.yaml" -I "*.sh" -I "*.py" -p | grep -v / | awk ' { print " -f " $1 } ') --dry-run
+  manifests="$(find . -maxdepth 1 -type f -name '*.yaml' -and -not -name '*openshift*' -and -not -name 'scc*')"
+  with_f_arg="$(echo "$manifests" | awk '{printf " -f %s",$1}')" # don't add newline
+  # shellcheck disable=SC2086 # '-f manifest1.yaml -f manifest2.yaml etc.' should not be quoted
+  kubectl create ${with_f_arg} --dry-run=client
 }
 
 function create_cluster_prerequisites() {
@@ -139,9 +149,14 @@ function create_cluster_prerequisites() {
   kubectl create -f crds.yaml -f common.yaml
 }
 
+function deploy_manifest_with_local_build() {
+  sed -i "s|image: rook/ceph:[0-9a-zA-Z.]*|image: rook/ceph:local-build|g" $1
+  kubectl create -f $1
+}
+
 function deploy_cluster() {
   cd cluster/examples/kubernetes/ceph
-  kubectl create -f operator.yaml
+  deploy_manifest_with_local_build operator.yaml
   sed -i "s|#deviceFilter:|deviceFilter: ${BLOCK/\/dev\/}|g" cluster-test.yaml
   kubectl create -f cluster-test.yaml
   kubectl create -f object-test.yaml
@@ -150,13 +165,26 @@ function deploy_cluster() {
   kubectl create -f rbdmirror.yaml
   kubectl create -f filesystem-mirror.yaml
   kubectl create -f nfs-test.yaml
-  kubectl create -f toolbox.yaml
+  deploy_manifest_with_local_build toolbox.yaml
 }
 
 function wait_for_prepare_pod() {
-  timeout 180 sh -c 'until kubectl -n rook-ceph logs -f job/$(kubectl -n rook-ceph get job -l app=rook-ceph-osd-prepare -o jsonpath='{.items[0].metadata.name}'); do sleep 5; done' || true
-  timeout 60 sh -c 'until kubectl -n rook-ceph logs $(kubectl -n rook-ceph get pod -l app=rook-ceph-osd,ceph_daemon_id=0 -o jsonpath='{.items[*].metadata.name}') --all-containers; do echo "waiting for osd container" && sleep 1; done' || true
-  kubectl -n rook-ceph describe job/$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}') || true
+  timeout 180 bash <<-'EOF'
+    while true; do
+      if [[ "$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare --field-selector=status.phase=Running)" -gt 1 ]]; then
+        break
+      fi
+      sleep 5
+    done
+    kubectl -n rook-ceph logs --follow pod/$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare -o jsonpath='{.items[0].metadata.name}')
+EOF
+  timeout 60 bash <<-'EOF'
+  until kubectl -n rook-ceph logs $(kubectl -n rook-ceph get pod -l app=rook-ceph-osd,ceph_daemon_id=0 -o jsonpath='{.items[*].metadata.name}') --all-containers || true; do
+    echo "waiting for osd container"
+    sleep 1
+  done
+EOF
+  kubectl -n rook-ceph describe job/"$(kubectl -n rook-ceph get pod -l app=rook-ceph-osd-prepare -o jsonpath='{.items[*].metadata.name}')" || true
   kubectl -n rook-ceph describe deploy/rook-ceph-osd-0 || true
 }
 
@@ -164,7 +192,7 @@ function wait_for_ceph_to_be_ready() {
   DAEMONS=$1
   OSD_COUNT=$2
   mkdir test
-  tests/scripts/validate_cluster.sh $DAEMONS $OSD_COUNT
+  tests/scripts/validate_cluster.sh "$DAEMONS" "$OSD_COUNT"
   kubectl -n rook-ceph get pods
 }
 
@@ -187,73 +215,67 @@ function create_LV_on_disk() {
   kubectl create -f cluster/examples/kubernetes/ceph/common.yaml
 }
 
-function generate_tls_config {
-DIR=$1
-SERVICE=$2
-NAMESPACE=$3
-IP=$4
-if [ -z "${IP}" ]; then
-    IP=127.0.0.1
-fi
-
-  openssl genrsa -out "${DIR}"/"${SERVICE}".key 2048
-
-  cat <<EOF >"${DIR}"/csr.conf
-[req]
-req_extensions = v3_req
-distinguished_name = req_distinguished_name
-[req_distinguished_name]
-[ v3_req ]
-basicConstraints = CA:FALSE
-keyUsage = nonRepudiation, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-subjectAltName = @alt_names
-[alt_names]
-DNS.1 = ${SERVICE}
-DNS.2 = ${SERVICE}.${NAMESPACE}
-DNS.3 = ${SERVICE}.${NAMESPACE}.svc
-DNS.4 = ${SERVICE}.${NAMESPACE}.svc.cluster.local
-IP.1  = ${IP}
-EOF
-
-  openssl req -new -key "${DIR}"/"${SERVICE}".key -subj "/CN=${SERVICE}.${NAMESPACE}.svc" -out "${DIR}"/server.csr -config "${DIR}"/csr.conf
-
-  export CSR_NAME=${SERVICE}-csr
-
-  cat <<EOF >"${DIR}"/csr.yaml
-apiVersion: certificates.k8s.io/v1beta1
-kind: CertificateSigningRequest
-metadata:
-  name: ${CSR_NAME}
-spec:
-  groups:
-  - system:authenticated
-  request: $(cat ${DIR}/server.csr | base64 | tr -d '\n')
-  usages:
-  - digital signature
-  - key encipherment
-  - server auth
-EOF
-
-  kubectl create -f "${DIR}/"csr.yaml
-
-  kubectl certificate approve ${CSR_NAME}
-
-  serverCert=$(kubectl get csr ${CSR_NAME} -o jsonpath='{.status.certificate}')
-  echo "${serverCert}" | openssl base64 -d -A -out "${DIR}"/"${SERVICE}".crt
-  kubectl config view --raw --minify --flatten -o jsonpath='{.clusters[].cluster.certificate-authority-data}' | base64 -d > "${DIR}"/"${SERVICE}".ca
+function deploy_first_rook_cluster() {
+  BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
+  cd cluster/examples/kubernetes/ceph/
+  kubectl create -f crds.yaml -f common.yaml -f operator.yaml
+  yq w -i -d1 cluster-test.yaml spec.dashboard.enabled false
+  yq w -i -d1 cluster-test.yaml spec.storage.useAllDevices false
+  yq w -i -d1 cluster-test.yaml spec.storage.deviceFilter "${BLOCK}"1
+  kubectl create -f cluster-test.yaml -f toolbox.yaml
 }
 
-selected_function="$1"
-if [ "$selected_function" = "generate_tls_config" ]; then
-    $selected_function $2 $3 $4 $5
-elif [ "$selected_function" = "wait_for_ceph_to_be_ready" ]; then
-     $selected_function $2 $3
-else
-  $selected_function
-fi
+function wait_for_rgw_pods() {
+  for _ in {1..120}; do
+    if [ "$(kubectl -n "$1" get pod -l app=rook-ceph-rgw --field-selector=status.phase=Running|wc -l)" -gt 1 ] ; then
+        echo "rgw pods found"
+        break
+    fi
+    echo "waiting for rgw pods"
+    sleep 5;
+  done
 
-if [ $? -ne 0 ]; then
-  echo "Function call to '$selected_function' was not successful" >&2
+}
+
+function deploy_second_rook_cluster() {
+  BLOCK=$(sudo lsblk|awk '/14G/ {print $1}'| head -1)
+  cd cluster/examples/kubernetes/ceph/
+  NAMESPACE=rook-ceph-secondary envsubst < common-second-cluster.yaml | kubectl create -f -
+  sed -i 's/namespace: rook-ceph/namespace: rook-ceph-secondary/g' cluster-test.yaml
+  yq w -i -d1 cluster-test.yaml spec.storage.deviceFilter "${BLOCK}"2
+  yq w -i -d1 cluster-test.yaml spec.dataDirHostPath "/var/lib/rook-external"
+  yq w -i toolbox.yaml metadata.namespace rook-ceph-secondary
+  kubectl create -f cluster-test.yaml -f toolbox.yaml
+}
+
+function write_object_to_cluster1_read_from_cluster2() {
+  cd cluster/examples/kubernetes/ceph/
+  echo "[default]" > s3cfg
+  echo "host_bucket = no.way.in.hell" >> ./s3cfg
+  echo "use_https = False" >> ./s3cfg
+  fallocate -l 1M ./1M.dat
+  echo "hello world" >> ./1M.dat
+  CLUSTER_1_IP_ADDR=$(kubectl -n rook-ceph get svc rook-ceph-rgw-multisite-store -o jsonpath="{.spec.clusterIP}")
+  BASE64_ACCESS_KEY=$(kubectl -n rook-ceph get secrets realm-a-keys -o jsonpath="{.data.access-key}")
+  BASE64_SECRET_KEY=$(kubectl -n rook-ceph get secrets realm-a-keys -o jsonpath="{.data.secret-key}")
+  ACCESS_KEY=$(echo ${BASE64_ACCESS_KEY} | base64 --decode)
+  SECRET_KEY=$(echo ${BASE64_SECRET_KEY} | base64 --decode)
+  s3cmd -v -d --config=s3cfg --access_key=${ACCESS_KEY} --secret_key=${SECRET_KEY} --host=${CLUSTER_1_IP_ADDR} mb s3://bkt
+  s3cmd -v -d --config=s3cfg --access_key=${ACCESS_KEY} --secret_key=${SECRET_KEY} --host=${CLUSTER_1_IP_ADDR} put ./1M.dat s3://bkt
+  CLUSTER_2_IP_ADDR=$(kubectl -n rook-ceph-secondary get svc rook-ceph-rgw-zone-b-multisite-store -o jsonpath="{.spec.clusterIP}")
+  timeout 60 bash <<EOF
+until s3cmd -v -d --config=s3cfg --access_key=${ACCESS_KEY} --secret_key=${SECRET_KEY} --host=${CLUSTER_2_IP_ADDR} get s3://bkt/1M.dat 1M-get.dat --force; do
+  echo "waiting for object to be replicated"
+  sleep 5
+done
+EOF
+  diff 1M.dat 1M-get.dat
+}
+
+FUNCTION="$1"
+shift # remove function arg now that we've recorded it
+# call the function with the remainder of the user-provided args
+if ! $FUNCTION "$@"; then
+  echo "Call to $FUNCTION was not successful" >&2
   exit 1
 fi

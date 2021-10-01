@@ -25,7 +25,7 @@ OSD_COUNT=$2
 #############
 # FUNCTIONS #
 #############
-EXEC_COMMAND="kubectl -n rook-ceph exec $(kubectl get pod -l app=rook-ceph-tools -n rook-ceph -o jsonpath='{.items[0].metadata.name}') -- ceph --connect-timeout 3"
+EXEC_COMMAND="kubectl -n rook-ceph exec $(kubectl get pod -l app=rook-ceph-tools -n rook-ceph -o jsonpath='{.items[*].metadata.name}') -- ceph --connect-timeout 3"
 
 trap display_status SIGINT ERR
 
@@ -89,7 +89,7 @@ function test_demo_pool {
 
 function test_csi {
   # shellcheck disable=SC2046
-  timeout 90 sh -c 'until [ $(kubectl -n rook-ceph get pods --field-selector=status.phase=Running|grep -c ^csi-) -eq 4 ]; do sleep 1; done'
+  timeout 180 sh -c 'until [ $(kubectl -n rook-ceph get pods --field-selector=status.phase=Running|grep -c ^csi-) -eq 4 ]; do sleep 1; done'
   if [ $? -eq 0 ]; then
     return 0
   fi

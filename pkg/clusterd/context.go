@@ -22,7 +22,6 @@ import (
 	rookclient "github.com/rook/rook/pkg/client/clientset/versioned"
 	"github.com/rook/rook/pkg/util/exec"
 	"github.com/rook/rook/pkg/util/sys"
-	"github.com/tevino/abool"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -32,7 +31,6 @@ import (
 
 // Context for loading or applying the configuration state of a service.
 type Context struct {
-
 	// The kubernetes config used for this context
 	KubeConfig *rest.Config
 
@@ -66,15 +64,9 @@ type Context struct {
 	// The full path to a config file that can be used to override generated settings
 	ConfigFileOverride string
 
-	// Information about the network for this machine and its cluster
-	NetworkInfo NetworkInfo
-
 	// NetworkClient is a connection to the CNI plugin API
 	NetworkClient netclient.K8sCniCncfIoV1Interface
 
 	// The local devices detected on the node
 	Devices []*sys.LocalDisk
-
-	// RequestCancelOrchestration manages the orchestration and its possible cancellation
-	RequestCancelOrchestration *abool.AtomicBool
 }

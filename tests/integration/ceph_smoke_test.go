@@ -65,11 +65,6 @@ func TestCephSmokeSuite(t *testing.T) {
 		t.Skip()
 	}
 
-	// Skip the suite if CSI is not supported
-	kh, err := utils.CreateK8sHelper(func() *testing.T { return t })
-	require.NoError(t, err)
-	checkSkipCSITest(t, kh)
-
 	s := new(SmokeSuite)
 	defer func(s *SmokeSuite) {
 		HandlePanics(recover(), s.TearDownSuite, s.T)
@@ -96,14 +91,13 @@ func (s *SmokeSuite) SetupSuite() {
 		UsePVC:                    installer.UsePVC(),
 		Mons:                      3,
 		SkipOSDCreation:           false,
-		UseCSI:                    true,
 		EnableAdmissionController: true,
 		UseCrashPruner:            true,
-		RookVersion:               installer.VersionMaster,
-		CephVersion:               installer.PacificVersion,
+		RookVersion:               installer.LocalBuildTag,
+		CephVersion:               installer.ReturnCephVersion(),
 	}
 	s.settings.ApplyEnvVars()
-	s.installer, s.k8sh = StartTestCluster(s.T, s.settings, smokeSuiteMinimalTestVersion)
+	s.installer, s.k8sh = StartTestCluster(s.T, s.settings)
 	if s.k8sh.VersionAtLeast("v1.16.0") {
 		s.settings.EnableVolumeReplication = true
 	}
@@ -131,7 +125,10 @@ func (s *SmokeSuite) TestObjectStorage_SmokeTest() {
 	if utils.IsPlatformOpenShift() {
 		s.T().Skip("object store tests skipped on openshift")
 	}
-	runObjectE2ETest(s.helper, s.k8sh, s.Suite, s.settings.Namespace)
+	storeName := "lite-store"
+	deleteStore := true
+	tls := false
+	runObjectE2ETestLite(s.T(), s.helper, s.k8sh, s.settings.Namespace, storeName, 2, deleteStore, tls)
 }
 
 // Test to make sure all rook components are installed and Running

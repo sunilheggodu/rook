@@ -19,11 +19,12 @@ package integration
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/stretchr/testify/require"
 	"os/exec"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/tests/framework/installer"
@@ -91,15 +92,15 @@ func (s *CephMgrSuite) SetupSuite() {
 		UseHelm:           false,
 		UsePVC:            false,
 		Mons:              1,
-		UseCSI:            true,
 		SkipOSDCreation:   true,
 		EnableDiscovery:   true,
-		RookVersion:       installer.VersionMaster,
+		RookVersion:       installer.LocalBuildTag,
 		CephVersion:       installer.MasterVersion,
 	}
 	s.settings.ApplyEnvVars()
-	s.installer, s.k8sh = StartTestCluster(s.T, s.settings, cephMasterSuiteMinimalTestVersion)
+	s.installer, s.k8sh = StartTestCluster(s.T, s.settings)
 	s.waitForOrchestrationModule()
+	s.prepareLocalStorageClass("local-storage")
 }
 
 func (s *CephMgrSuite) AfterTest(suiteName, testName string) {
@@ -107,12 +108,37 @@ func (s *CephMgrSuite) AfterTest(suiteName, testName string) {
 }
 
 func (s *CephMgrSuite) TearDownSuite() {
+	_ = s.k8sh.DeleteResource("sc", "local-storage")
 	s.installer.UninstallRook()
 }
 
 func (s *CephMgrSuite) execute(command []string) (error, string) {
 	orchCommand := append([]string{"orch"}, command...)
 	return s.installer.Execute("ceph", orchCommand, s.namespace)
+}
+
+func (s *CephMgrSuite) prepareLocalStorageClass(storageClassName string) {
+	// Rook orchestrator use PVs based in this storage class to create OSDs
+	// It is also needed to list "devices"
+	localStorageClass := `
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: ` + storageClassName + `
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+`
+	err := s.k8sh.ResourceOperation("apply", localStorageClass)
+	if err == nil {
+		err, _ = s.installer.Execute("ceph", []string{"config", "set", "mgr", "mgr/rook/storage_class", storageClassName}, s.namespace)
+		if err == nil {
+			logger.Infof("Storage class %q set in manager config", storageClassName)
+		} else {
+			assert.Fail(s.T(), fmt.Sprintf("Error configuring local storage class in manager config: %q", err))
+		}
+	} else {
+		assert.Fail(s.T(), fmt.Sprintf("Error creating local storage class: %q ", err))
+	}
 }
 
 func (s *CephMgrSuite) enableOrchestratorModule() {
@@ -150,8 +176,10 @@ func (s *CephMgrSuite) waitForOrchestrationModule() {
 
 			// Get status information
 			bytes := []byte(output)
+			logBytesInfo(bytes)
+
 			var status orchStatus
-			err := json.Unmarshal(bytes, &status)
+			err := json.Unmarshal(bytes[:len(output)], &status)
 			if err != nil {
 				logger.Error("Error getting ceph orch status")
 				continue
@@ -195,6 +223,14 @@ func (s *CephMgrSuite) TestStatus() {
 	assert.Equal(s.T(), status, "Backend: rook\nAvailable: Yes")
 }
 
+func logBytesInfo(bytesSlice []byte) {
+	logger.Infof("---- bytes slice info ---")
+	logger.Infof("bytes: %v\n", bytesSlice)
+	logger.Infof("length: %d\n", len(bytesSlice))
+	logger.Infof("string: -->%s<--\n", string(bytesSlice))
+	logger.Infof("-------------------------")
+}
+
 func (s *CephMgrSuite) TestHostLs() {
 	logger.Info("Testing .... <ceph orch host ls>")
 
@@ -204,16 +240,17 @@ func (s *CephMgrSuite) TestHostLs() {
 	logger.Infof("output = %s", output)
 
 	hosts := []byte(output)
-	var hostsList []host
+	logBytesInfo(hosts)
 
-	err = json.Unmarshal(hosts, &hostsList)
+	var hostsList []host
+	err = json.Unmarshal(hosts[:len(output)], &hostsList)
 	if err != nil {
 		assert.Nil(s.T(), err)
 	}
 
 	var hostOutput []string
 	for _, hostItem := range hostsList {
-		hostOutput = append(hostOutput, hostItem.Addr)
+		hostOutput = append(hostOutput, hostItem.Hostname)
 	}
 	sort.Strings(hostOutput)
 
@@ -238,9 +275,10 @@ func (s *CephMgrSuite) TestServiceLs() {
 	logger.Infof("output = %s", output)
 
 	services := []byte(output)
-	var servicesList []service
+	logBytesInfo(services)
 
-	err = json.Unmarshal(services, &servicesList)
+	var servicesList []service
+	err = json.Unmarshal(services[:len(output)], &servicesList)
 	assert.Nil(s.T(), err)
 
 	labelFilter := ""

@@ -31,7 +31,6 @@ import (
 	cephclient "github.com/rook/rook/pkg/daemon/ceph/client"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/mgr"
 	"github.com/rook/rook/pkg/operator/ceph/config"
-	opcontroller "github.com/rook/rook/pkg/operator/ceph/controller"
 	"github.com/rook/rook/pkg/operator/k8sutil"
 	"github.com/rook/rook/pkg/util"
 	"github.com/rook/rook/pkg/util/exec"
@@ -39,6 +38,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 const (
@@ -151,7 +151,7 @@ func removeObjectStoreFromMultisite(objContext *Context, spec cephv1.ObjectStore
 	if err != nil {
 		return errors.Wrap(err, "failed to update period after removing an endpoint from the zone")
 	}
-	logger.Infof("successfully updated period for realm %v after removal of object-store %v", objContext.Realm, objContext.Name)
+	logger.Infof("successfully updated period for realm %q after removal of object-store %q", objContext.Realm, objContext.Name)
 
 	return nil
 }
@@ -373,9 +373,9 @@ func createMultisite(objContext *Context, endpointArg string) error {
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph realm %q, for reason %q", objContext.ZoneGroup, output)
 			}
-			logger.Debugf("created realm %v", objContext.Realm)
+			logger.Debugf("created realm %q", objContext.Realm)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin realm get failed with code %d, for reason %q. %v", strconv.Itoa(code), output, string(kerrors.ReasonForError(err)))
+			return errorOrIsNotFound(err, "'radosgw-admin realm get' failed with code %d, for reason %q. %v", strconv.Itoa(code), output, string(kerrors.ReasonForError(err)))
 		}
 	}
 
@@ -389,9 +389,9 @@ func createMultisite(objContext *Context, endpointArg string) error {
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph zone group %q, for reason %q", objContext.ZoneGroup, output)
 			}
-			logger.Debugf("created zone group %v", objContext.ZoneGroup)
+			logger.Debugf("created zone group %q", objContext.ZoneGroup)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin zonegroup get failed with code %d, for reason %q", strconv.Itoa(code), output)
+			return errorOrIsNotFound(err, "'radosgw-admin zonegroup get' failed with code %d, for reason %q", strconv.Itoa(code), output)
 		}
 	}
 
@@ -405,19 +405,33 @@ func createMultisite(objContext *Context, endpointArg string) error {
 			if err != nil {
 				return errorOrIsNotFound(err, "failed to create ceph zone %q, for reason %q", objContext.Zone, output)
 			}
-			logger.Debugf("created zone %v", objContext.Zone)
+			logger.Debugf("created zone %q", objContext.Zone)
 		} else {
-			return errorOrIsNotFound(err, "radosgw-admin zone get failed with code %d, for reason %q", strconv.Itoa(code), output)
+			return errorOrIsNotFound(err, "'radosgw-admin zone get' failed with code %d, for reason %q", strconv.Itoa(code), output)
+		}
+	}
+
+	// check if the period exists
+	output, err = runAdminCommand(objContext, false, "period", "get")
+	if err != nil {
+		code, err := exec.ExtractExitCode(err)
+		// ENOENT means “No such file or directory”
+		if err == nil && code == int(syscall.ENOENT) {
+			// period does not exist and so needs to be created
+			logger.Debugf("period must be updated for CephObjectStore %q because it does not exist", objContext.Name)
+			updatePeriod = true
+		} else {
+			return errorOrIsNotFound(err, "'radosgw-admin period get' failed with code %d, for reason %q", strconv.Itoa(code), output)
 		}
 	}
 
 	if updatePeriod {
 		// the period will help notify other zones of changes if there are multi-zones
-		_, err := runAdminCommand(objContext, false, "period", "update", "--commit")
+		_, err = runAdminCommand(objContext, false, "period", "update", "--commit")
 		if err != nil {
 			return errorOrIsNotFound(err, "failed to update period")
 		}
-		logger.Debugf("updated period for realm %v", objContext.Realm)
+		logger.Debugf("updated period for realm %q", objContext.Realm)
 	}
 
 	logger.Infof("Multisite for object-store: realm=%s, zonegroup=%s, zone=%s", objContext.Realm, objContext.ZoneGroup, objContext.Zone)
@@ -685,14 +699,14 @@ func missingPools(context *Context) ([]string, error) {
 	if err != nil {
 		return []string{}, errors.Wrapf(err, "failed to determine if pools are missing. failed to list pools")
 	}
-	existingPools := util.NewSet()
+	existingPools := sets.NewString()
 	for _, summary := range existingPoolSummaries {
-		existingPools.Add(summary.Name)
+		existingPools.Insert(summary.Name)
 	}
 
 	missingPools := []string{}
 	for _, objPool := range allObjectPools(context.Name) {
-		if !existingPools.Contains(objPool) {
+		if !existingPools.Has(objPool) {
 			missingPools = append(missingPools, objPool)
 		}
 	}
@@ -821,15 +835,11 @@ func poolName(storeName, poolName string) string {
 }
 
 // GetObjectBucketProvisioner returns the bucket provisioner name appended with operator namespace if OBC is watching on it
-func GetObjectBucketProvisioner(c *clusterd.Context, namespace string) string {
+func GetObjectBucketProvisioner(data map[string]string, namespace string) string {
 	provName := bucketProvisionerName
-	obcWatchOnNamespace, err := k8sutil.GetOperatorSetting(c.Clientset, opcontroller.OperatorSettingConfigMapName, "ROOK_OBC_WATCH_OPERATOR_NAMESPACE", "false")
-	if err != nil {
-		logger.Warning("failed to verify if obc should watch the operator namespace or all of them, watching all")
-	} else {
-		if strings.EqualFold(obcWatchOnNamespace, "true") {
-			provName = fmt.Sprintf("%s.%s", namespace, bucketProvisionerName)
-		}
+	obcWatchOnNamespace := k8sutil.GetValue(data, "ROOK_OBC_WATCH_OPERATOR_NAMESPACE", "false")
+	if strings.EqualFold(obcWatchOnNamespace, "true") {
+		provName = fmt.Sprintf("%s.%s", namespace, bucketProvisionerName)
 	}
 	return provName
 }
@@ -865,7 +875,10 @@ func enableRGWDashboard(context *Context) error {
 	}
 	// TODO:
 	// Use admin ops user instead!
-	u, errCode, err := CreateUser(context, user)
+	// It's safe to create the user with the force flag regardless if the cluster's dashboard is
+	// configured as a secondary rgw site. The creation will return the user already exists and we
+	// will just fetch it (it has been created by the primary cluster)
+	u, errCode, err := CreateUser(context, user, true)
 	if err != nil || errCode != 0 {
 		return errors.Wrapf(err, "failed to create user %q", DashboardUser)
 	}
@@ -875,7 +888,7 @@ func enableRGWDashboard(context *Context) error {
 
 	// for latest Ceph versions
 	if mgr.FileBasedPasswordSupported(context.clusterInfo) {
-		accessFile, err := mgr.CreateTempPasswordFile(*u.AccessKey)
+		accessFile, err := util.CreateTempFile(*u.AccessKey)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard access-key file")
 		}
@@ -887,7 +900,7 @@ func enableRGWDashboard(context *Context) error {
 			}
 		}()
 
-		secretFile, err = mgr.CreateTempPasswordFile(*u.SecretKey)
+		secretFile, err = util.CreateTempFile(*u.SecretKey)
 		if err != nil {
 			return errors.Wrap(err, "failed to create a temporary dashboard secret-key file")
 		}

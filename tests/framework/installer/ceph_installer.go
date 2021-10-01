@@ -50,9 +50,12 @@ const (
 	// test with the latest octopus build
 	octopusTestImage = "quay.io/ceph/ceph:v15"
 	// test with the latest pacific build
-	pacificTestImage = "quay.io/ceph/ceph:v16"
+	pacificTestImage = "quay.io/ceph/ceph:v16.2.6"
+	// test with the current development version of Pacific
+	pacificDevelTestImage = "quay.io/ceph/daemon-base:latest-pacific-devel"
+	octopusDevelTestImage = "quay.io/ceph/daemon-base:latest-octopus-devel"
 	// test with the latest master image
-	masterTestImage    = "ceph/daemon-base:latest-master-devel"
+	masterTestImage    = "quay.io/ceph/daemon-base:latest-master-devel"
 	cephOperatorLabel  = "app=rook-ceph-operator"
 	defaultclusterName = "test-cluster"
 
@@ -67,7 +70,9 @@ var (
 	NautilusVersion          = cephv1.CephVersionSpec{Image: nautilusTestImage}
 	NautilusPartitionVersion = cephv1.CephVersionSpec{Image: nautilusTestImagePartition}
 	OctopusVersion           = cephv1.CephVersionSpec{Image: octopusTestImage}
+	OctopusDevelVersion      = cephv1.CephVersionSpec{Image: octopusDevelTestImage}
 	PacificVersion           = cephv1.CephVersionSpec{Image: pacificTestImage}
+	PacificDevelVersion      = cephv1.CephVersionSpec{Image: pacificDevelTestImage}
 	MasterVersion            = cephv1.CephVersionSpec{Image: masterTestImage, AllowUnsupported: true}
 )
 
@@ -81,6 +86,17 @@ type CephInstaller struct {
 	k8sVersion       string
 	changeHostnames  bool
 	T                func() *testing.T
+}
+
+func ReturnCephVersion() cephv1.CephVersionSpec {
+	switch os.Getenv("CEPH_SUITE_VERSION") {
+	case "master":
+		return MasterVersion
+	case "pacific-devel":
+		return PacificDevelVersion
+	default:
+		return PacificVersion
+	}
 }
 
 // CreateCephOperator creates rook-operator via kubectl
@@ -448,7 +464,7 @@ func (h *CephInstaller) installRookOperator() (bool, error) {
 		startDiscovery = true
 		err := h.CreateRookOperatorViaHelm(map[string]interface{}{
 			"enableDiscoveryDaemon": true,
-			"image":                 map[string]interface{}{"tag": "master"},
+			"image":                 map[string]interface{}{"tag": LocalBuildTag},
 		})
 		if err != nil {
 			return false, errors.Wrap(err, "failed to configure helm")
@@ -466,14 +482,6 @@ func (h *CephInstaller) installRookOperator() (bool, error) {
 		return false, err
 	}
 
-	// disable admission controller test for Kubernetes version older than v1.16.0
-	if h.settings.EnableAdmissionController && !utils.IsPlatformOpenShift() && h.k8shelper.VersionAtLeast("v1.16.0") {
-		if !h.k8shelper.IsPodInExpectedState("rook-ceph-admission-controller", h.settings.OperatorNamespace, "Running") {
-			assert.Fail(h.T(), "admission controller is not running")
-			return false, errors.Errorf("admission controller is not running")
-		}
-	}
-
 	discovery, err := h.k8shelper.Clientset.AppsV1().DaemonSets(h.settings.OperatorNamespace).Get(ctx, "rook-discover", metav1.GetOptions{})
 	if startDiscovery {
 		assert.NoError(h.T(), err)
@@ -487,7 +495,7 @@ func (h *CephInstaller) installRookOperator() (bool, error) {
 }
 
 func (h *CephInstaller) InstallRook() (bool, error) {
-	if h.settings.RookVersion != VersionMaster {
+	if h.settings.RookVersion != LocalBuildTag {
 		// make sure we have the images from a previous release locally so the test doesn't hit a timeout
 		assert.NoError(h.T(), h.k8shelper.GetDockerImage("rook/ceph:"+h.settings.RookVersion))
 	}
@@ -507,7 +515,7 @@ func (h *CephInstaller) InstallRook() (bool, error) {
 
 	if h.settings.UseHelm {
 		err = h.CreateRookCephClusterViaHelm(map[string]interface{}{
-			"image": "rook/ceph:master",
+			"image": "rook/ceph:" + LocalBuildTag,
 		})
 		if err != nil {
 			return false, errors.Wrap(err, "failed to install ceph cluster using Helm")
@@ -909,7 +917,7 @@ spec:
           restartPolicy: Never
           containers:
               - name: rook-cleaner
-                image: rook/ceph:` + VersionMaster + `
+                image: rook/ceph:` + LocalBuildTag + `
                 securityContext:
                     privileged: true
                 volumeMounts:
@@ -939,7 +947,7 @@ spec:
           restartPolicy: Never
           containers:
               - name: rook-cleaner
-                image: rook/ceph:` + VersionMaster + `
+                image: rook/ceph:` + LocalBuildTag + `
                 securityContext:
                     privileged: true
                 volumeMounts:
